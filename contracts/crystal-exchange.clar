@@ -703,3 +703,78 @@
     (ok true)
   )
 )
+
+;; Reinforce chamber with additional deposit for security
+(define-public (reinforce-chamber-security (chamber-id uint) (additional-deposit uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (> additional-deposit u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (current-quantity (get quantity chamber-data))
+        (current-status (get chamber-status chamber-data))
+        (new-quantity (+ current-quantity additional-deposit))
+      )
+      ;; Only originator can reinforce
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Chamber must be in appropriate state
+      (asserts! (or (is-eq current-status "pending") 
+                    (is-eq current-status "acknowledged") 
+                    (is-eq current-status "secured"))
+                ERR_ALREADY_PROCESSED)
+      ;; Must not exceed safe limit
+      (asserts! (<= new-quantity u1000000000) (err u250)) ;; 1 billion STX limit
+
+      ;; Process additional deposit
+      (match (stx-transfer? additional-deposit tx-sender (as-contract tx-sender))
+        success
+          (begin
+            ;; Update chamber with new total
+            (map-set ChamberRegistry
+              { chamber-id: chamber-id }
+              (merge chamber-data { quantity: new-quantity })
+            )
+            (print {action: "chamber_reinforced", chamber-id: chamber-id, originator: originator, 
+                   previous-amount: current-quantity, additional-deposit: additional-deposit, new-total: new-quantity})
+            (ok new-quantity)
+          )
+        error ERR_TRANSFER_ERROR
+      )
+    )
+  )
+)
+
+;; Register secure obfuscated accountability trail
+(define-public (register-accountability-proof (chamber-id uint) (proof-hash (buff 32)) (timestamp uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (>= timestamp block-height) ERR_INVALID_QUANTITY)
+    (asserts! (<= timestamp (+ block-height u10)) ERR_INVALID_QUANTITY) ;; Maximum 10 blocks in future
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+        (current-status (get chamber-status chamber-data))
+      )
+      ;; Only originator, beneficiary, or supervisor can register accountability
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)
+                   (is-eq tx-sender PROTOCOL_SUPERVISOR)) 
+                ERR_UNAUTHORIZED)
+      ;; Chamber must not be in finalized states
+      (asserts! (not (is-eq current-status "finalized")) ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq current-status "terminated")) ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq current-status "outdated")) ERR_ALREADY_PROCESSED)
+
+      ;; Process accountability registration
+      ;; In production, would store the proof hash
+
+      (print {action: "accountability_proof_registered", chamber-id: chamber-id, registrar: tx-sender, 
+              proof-hash: proof-hash, timestamp: timestamp, registration-block: block-height})
+      (ok true)
+    )
+  )
+)
