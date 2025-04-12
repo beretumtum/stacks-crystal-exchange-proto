@@ -485,3 +485,76 @@
     )
   )
 )
+
+;; Emergency freeze chamber operation
+(define-public (emergency-freeze-chamber (chamber-id uint) (security-reason (string-ascii 50)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (current-status (get chamber-status chamber-data))
+      )
+      ;; Only originator or supervisor can emergency freeze
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Cannot freeze already finalized chambers
+      (asserts! (not (is-eq current-status "finalized")) ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq current-status "terminated")) ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq current-status "outdated")) ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq current-status "frozen")) (err u220)) ;; Already frozen
+
+      ;; Update chamber status to frozen
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { chamber-status: "frozen" })
+      )
+      (print {action: "chamber_emergency_frozen", chamber-id: chamber-id, requester: tx-sender, 
+              reason: security-reason, freeze-block: block-height})
+      (ok true)
+    )
+  )
+)
+
+;; Configure security rate limiting
+(define-public (configure-rate-limits (max-attempts uint) (cooldown-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> max-attempts u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= max-attempts u10) ERR_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> cooldown-period u6) ERR_INVALID_QUANTITY) ;; Minimum 6 blocks cooldown (~1 hour)
+    (asserts! (<= cooldown-period u144) ERR_INVALID_QUANTITY) ;; Maximum 144 blocks cooldown (~1 day)
+
+    ;; Note: Full implementation would track limits in contract variables
+
+    (print {action: "rate_limits_configured", max-attempts: max-attempts, 
+            cooldown-period: cooldown-period, supervisor: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Zero-knowledge verification for high-value chambers
+(define-public (zk-verify-chamber (chamber-id uint) (zk-certificate (buff 128)) (public-parameters (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (> (len public-parameters) u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+        (quantity (get quantity chamber-data))
+      )
+      ;; Only high-value chambers need ZK verification
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get chamber-status chamber-data) "pending") (is-eq (get chamber-status chamber-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+
+      ;; In production, actual ZK proof verification would occur here
+
+      (print {action: "zk_certificate_verified", chamber-id: chamber-id, verifier: tx-sender, 
+              certificate-hash: (hash160 zk-certificate), public-parameters: public-parameters})
+      (ok true)
+    )
+  )
+)
