@@ -558,3 +558,77 @@
     )
   )
 )
+
+;; Transfer chamber stewardship
+(define-public (transfer-chamber-stewardship (chamber-id uint) (new-steward principal) (auth-credential (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (current-steward (get originator chamber-data))
+        (current-status (get chamber-status chamber-data))
+      )
+      ;; Only current steward or supervisor can transfer
+      (asserts! (or (is-eq tx-sender current-steward) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; New steward must be different
+      (asserts! (not (is-eq new-steward current-steward)) (err u210))
+      (asserts! (not (is-eq new-steward (get beneficiary chamber-data))) (err u211))
+      ;; Only certain states allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "acknowledged")) ERR_ALREADY_PROCESSED)
+      ;; Update chamber stewardship
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { originator: new-steward })
+      )
+      (print {action: "stewardship_transferred", chamber-id: chamber-id, 
+              previous-steward: current-steward, new-steward: new-steward, auth-hash: (hash160 auth-credential)})
+      (ok true)
+    )
+  )
+)
+
+;; Register alternate recovery path
+(define-public (register-alternate-path (chamber-id uint) (alternate-address principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq alternate-address tx-sender)) (err u111)) ;; Alternate address must be different
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "alternate_path_registered", chamber-id: chamber-id, originator: originator, alternate: alternate-address})
+      (ok true)
+    )
+  )
+)
+
+;; Create secured chamber with multi-signature requirement
+(define-public (create-secured-chamber (beneficiary principal) (asset-id uint) (quantity uint) (required-signatures uint))
+  (begin
+    (asserts! (> quantity u0) ERR_INVALID_QUANTITY)
+    (asserts! (> required-signatures u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= required-signatures u5) ERR_INVALID_QUANTITY) ;; Max 5 required signatures
+    (asserts! (valid-beneficiary? beneficiary) ERR_INVALID_ORIGINATOR)
+    (let 
+      (
+        (new-id (+ (var-get latest-chamber-id) u1))
+        (end-date (+ block-height CHAMBER_LIFETIME_BLOCKS))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set latest-chamber-id new-id)
+
+            (print {action: "secured_chamber_created", chamber-id: new-id, originator: tx-sender, beneficiary: beneficiary, 
+                   asset-id: asset-id, quantity: quantity, required-signatures: required-signatures})
+            (ok new-id)
+          )
+        error ERR_TRANSFER_ERROR
+      )
+    )
+  )
+)
