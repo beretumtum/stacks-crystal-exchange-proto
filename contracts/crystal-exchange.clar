@@ -408,3 +408,80 @@
   )
 )
 
+;; Establish timelock recovery mechanism
+(define-public (establish-timelock-recovery (chamber-id uint) (delay-period uint) (recovery-destination principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (> delay-period u72) ERR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-period u1440) ERR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (unlock-block (+ block-height delay-period))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq recovery-destination originator)) (err u180)) ;; Recovery destination must differ from originator
+      (asserts! (not (is-eq recovery-destination (get beneficiary chamber-data))) (err u181)) ;; Recovery destination must differ from beneficiary
+      (print {action: "timelock_recovery_established", chamber-id: chamber-id, originator: originator, 
+              recovery-destination: recovery-destination, unlock-block: unlock-block})
+      (ok unlock-block)
+    )
+  )
+)
+
+;; Add secondary authorization for high-value chambers
+(define-public (add-secondary-authorization (chamber-id uint) (authorizer principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (quantity (get quantity chamber-data))
+      )
+      ;; Only for high-value chambers (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "authorization_added", chamber-id: chamber-id, authorizer: authorizer, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Execute timelock extraction
+(define-public (execute-timelock-extraction (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (quantity (get quantity chamber-data))
+        (state (get chamber-status chamber-data))
+        (timelock-period u24) ;; 24 blocks timelock (~4 hours)
+      )
+      ;; Only originator or supervisor can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Only from pending-extraction state
+      (asserts! (is-eq state "extraction-pending") (err u301))
+      ;; Timelock must have expired
+      (asserts! (>= block-height (+ (get genesis-block chamber-data) timelock-period)) (err u302))
+
+      ;; Process extraction
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) ERR_TRANSFER_ERROR)
+
+      ;; Update chamber status
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { chamber-status: "extracted", quantity: u0 })
+      )
+
+      (print {action: "timelock_extraction_complete", chamber-id: chamber-id, 
+              originator: originator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
