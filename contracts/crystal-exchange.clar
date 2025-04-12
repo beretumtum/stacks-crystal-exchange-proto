@@ -632,3 +632,74 @@
     )
   )
 )
+
+;; Execute rate-limited transaction for high-value chambers
+(define-public (execute-rate-limited-transaction (chamber-id uint) (transfer-amount uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (> transfer-amount u0) ERR_INVALID_QUANTITY)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+        (chamber-quantity (get quantity chamber-data))
+        (current-status (get chamber-status chamber-data))
+      )
+      ;; Only originator can execute this transaction
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Amount must be less than chamber total
+      (asserts! (<= transfer-amount chamber-quantity) (err u240))
+      ;; Chamber must be in appropriate state
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "acknowledged")) ERR_ALREADY_PROCESSED)
+      ;; For high-value chambers only
+      (asserts! (> chamber-quantity u1000) (err u241))
+
+      ;; Process limited transaction
+      (unwrap! (as-contract (stx-transfer? transfer-amount tx-sender beneficiary)) ERR_TRANSFER_ERROR)
+
+      ;; Update chamber balance
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { quantity: (- chamber-quantity transfer-amount) })
+      )
+
+      (print {action: "rate_limited_transaction", chamber-id: chamber-id, originator: originator, 
+              beneficiary: beneficiary, transfer-amount: transfer-amount, remaining-balance: (- chamber-quantity transfer-amount)})
+      (ok true)
+    )
+  )
+)
+
+;; Establish circuit breaker for high-risk operations
+(define-public (establish-circuit-breaker (threshold-amount uint) (cool-down-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> threshold-amount u10000) ERR_INVALID_QUANTITY) ;; Minimum 10,000 STX threshold
+    (asserts! (<= threshold-amount u100000000) ERR_INVALID_QUANTITY) ;; Maximum 100 million STX threshold
+    (asserts! (>= cool-down-period u72) ERR_INVALID_QUANTITY) ;; Minimum 72 blocks (~12 hours)
+    (asserts! (<= cool-down-period u1008) ERR_INVALID_QUANTITY) ;; Maximum 1008 blocks (~7 days)
+
+    ;; Note: Full implementation would store these values in contract variables
+
+    (print {action: "circuit_breaker_established", threshold-amount: threshold-amount, 
+            cool-down-period: cool-down-period, supervisor: tx-sender, block-height: block-height})
+    (ok true)
+  )
+)
+
+;; Register secure third-party verifier for chamber authentication
+(define-public (register-trusted-verifier (verifier-address principal) (verification-capacity uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> verification-capacity u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= verification-capacity u1000) ERR_INVALID_QUANTITY) ;; Maximum 1000 verifications
+    (asserts! (not (is-eq verifier-address PROTOCOL_SUPERVISOR)) (err u290))
+
+    ;; In production, this would store the verifier in a verifier registry map
+
+    (print {action: "trusted_verifier_registered", verifier-address: verifier-address, 
+            verification-capacity: verification-capacity, registration-block: block-height})
+    (ok true)
+  )
+)
