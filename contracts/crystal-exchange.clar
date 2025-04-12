@@ -253,3 +253,81 @@
   )
 )
 
+;; Attach chamber reference data
+(define-public (attach-reference-data (chamber-id uint) (data-category (string-ascii 20)) (data-fingerprint (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+      )
+      ;; Only authorized parties can add reference data
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get chamber-status chamber-data) "finalized")) (err u160))
+      (asserts! (not (is-eq (get chamber-status chamber-data) "repatriated")) (err u161))
+      (asserts! (not (is-eq (get chamber-status chamber-data) "outdated")) (err u162))
+
+      ;; Valid data categories
+      (asserts! (or (is-eq data-category "asset-details") 
+                   (is-eq data-category "transfer-evidence")
+                   (is-eq data-category "quality-verification")
+                   (is-eq data-category "originator-specs")) (err u163))
+
+      (print {action: "reference_data_attached", chamber-id: chamber-id, data-category: data-category, 
+              data-fingerprint: data-fingerprint, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Suspend questionable chamber
+(define-public (suspend-questionable-chamber (chamber-id uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get chamber-status chamber-data) "pending") 
+                   (is-eq (get chamber-status chamber-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { chamber-status: "suspended" })
+      )
+      (print {action: "chamber_suspended", chamber-id: chamber-id, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Create phased transaction chamber
+(define-public (create-phased-chamber (beneficiary principal) (asset-id uint) (quantity uint) (phases uint))
+  (let 
+    (
+      (new-id (+ (var-get latest-chamber-id) u1))
+      (end-date (+ block-height CHAMBER_LIFETIME_BLOCKS))
+      (phase-quantity (/ quantity phases))
+    )
+    (asserts! (> quantity u0) ERR_INVALID_QUANTITY)
+    (asserts! (> phases u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= phases u5) ERR_INVALID_QUANTITY) ;; Max 5 phases
+    (asserts! (valid-beneficiary? beneficiary) ERR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* phase-quantity phases) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set latest-chamber-id new-id)
+          (print {action: "phased_chamber_created", chamber-id: new-id, originator: tx-sender, beneficiary: beneficiary, 
+                  asset-id: asset-id, quantity: quantity, phases: phases, phase-quantity: phase-quantity})
+          (ok new-id)
+        )
+      error ERR_TRANSFER_ERROR
+    )
+  )
+)
