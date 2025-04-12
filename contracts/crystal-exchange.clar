@@ -150,3 +150,106 @@
       )
     )
   )
+)
+
+;; Adjudicate contested chamber with proportional distribution
+(define-public (adjudicate-conflict (chamber-id uint) (originator-proportion uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (<= originator-proportion u100) ERR_INVALID_QUANTITY) ;; Proportion must be 0-100
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+        (quantity (get quantity chamber-data))
+        (originator-quantity (/ (* quantity originator-proportion) u100))
+        (beneficiary-quantity (- quantity originator-quantity))
+      )
+      (asserts! (is-eq (get chamber-status chamber-data) "contested") (err u112)) ;; Must be contested
+      (asserts! (<= block-height (get terminus-block chamber-data)) ERR_CHAMBER_OUTDATED)
+
+      ;; Transfer originator's portion
+      (unwrap! (as-contract (stx-transfer? originator-quantity tx-sender originator)) ERR_TRANSFER_ERROR)
+
+      ;; Transfer beneficiary's portion
+      (unwrap! (as-contract (stx-transfer? beneficiary-quantity tx-sender beneficiary)) ERR_TRANSFER_ERROR)
+      (print {action: "conflict_adjudicated", chamber-id: chamber-id, originator: originator, beneficiary: beneficiary, 
+              originator-quantity: originator-quantity, beneficiary-quantity: beneficiary-quantity, originator-proportion: originator-proportion})
+      (ok true)
+    )
+  )
+)
+
+;; Reclaim outdated chamber assets
+(define-public (reclaim-outdated-chamber (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (quantity (get quantity chamber-data))
+        (expiration (get terminus-block chamber-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get chamber-status chamber-data) "pending") (is-eq (get chamber-status chamber-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (asserts! (> block-height expiration) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ChamberRegistry
+              { chamber-id: chamber-id }
+              (merge chamber-data { chamber-status: "outdated" })
+            )
+            (print {action: "outdated_chamber_reclaimed", chamber-id: chamber-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_TRANSFER_ERROR
+      )
+    )
+  )
+)
+
+;; Initiate chamber conflict
+(define-public (initiate-chamber-conflict (chamber-id uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get chamber-status chamber-data) "pending") (is-eq (get chamber-status chamber-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get terminus-block chamber-data)) ERR_CHAMBER_OUTDATED)
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { chamber-status: "contested" })
+      )
+      (print {action: "chamber_contested", chamber-id: chamber-id, contestant: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Verify digital signature for chamber
+(define-public (append-digital-signature (chamber-id uint) (digital-signature (buff 65)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get chamber-status chamber-data) "pending") (is-eq (get chamber-status chamber-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (print {action: "signature_appended", chamber-id: chamber-id, signer: tx-sender, signature: digital-signature})
+      (ok true)
+    )
+  )
+)
+
