@@ -331,3 +331,80 @@
     )
   )
 )
+
+;; Register backup beneficiary for enhanced security
+(define-public (register-backup-beneficiary (chamber-id uint) (backup-beneficiary principal) (activation-delay uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (> activation-delay u24) ERR_INVALID_QUANTITY) ;; Minimum 24 blocks delay (~4 hours)
+    (asserts! (<= activation-delay u288) ERR_INVALID_QUANTITY) ;; Maximum 288 blocks delay (~2 days)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (current-beneficiary (get beneficiary chamber-data))
+        (activation-block (+ block-height activation-delay))
+      )
+      ;; Only originator can set backup beneficiary
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Backup beneficiary must be different from current beneficiary and originator
+      (asserts! (not (is-eq backup-beneficiary current-beneficiary)) (err u230))
+      (asserts! (not (is-eq backup-beneficiary originator)) (err u231))
+      ;; Chamber must be in appropriate state
+      (asserts! (or (is-eq (get chamber-status chamber-data) "pending") 
+                    (is-eq (get chamber-status chamber-data) "acknowledged")) 
+                ERR_ALREADY_PROCESSED)
+
+      (print {action: "backup_beneficiary_registered", chamber-id: chamber-id, originator: originator, 
+              current-beneficiary: current-beneficiary, backup-beneficiary: backup-beneficiary, 
+              activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Enable multi-factor authentication for high-value chambers
+(define-public (enable-multi-factor-auth (chamber-id uint) (auth-credentials (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (quantity (get quantity chamber-data))
+      )
+      ;; Only for chambers above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+      (print {action: "multi_factor_enabled", chamber-id: chamber-id, originator: originator, auth-hash: (hash160 auth-credentials)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic verification for high-value chambers
+(define-public (crypto-verify-chamber (chamber-id uint) (message-digest (buff 32)) (digital-signature (buff 65)) (signing-entity principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+        (verify-result (unwrap! (secp256k1-recover? message-digest digital-signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq signing-entity originator) (is-eq signing-entity beneficiary)) (err u151))
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+
+      ;; Verify signature matches expected signer
+      (asserts! (is-eq (unwrap! (principal-of? verify-result) (err u152)) signing-entity) (err u153))
+
+      (print {action: "crypto_verification_complete", chamber-id: chamber-id, verifier: tx-sender, signing-entity: signing-entity})
+      (ok true)
+    )
+  )
+)
+
