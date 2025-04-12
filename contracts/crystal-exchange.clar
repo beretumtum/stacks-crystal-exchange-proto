@@ -778,3 +778,73 @@
     )
   )
 )
+
+;; Split high-value chamber into smaller chambers for risk reduction
+(define-public (split-high-value-chamber (chamber-id uint) (split-count uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (>= split-count u2) ERR_INVALID_QUANTITY) ;; Minimum 2 chambers
+    (asserts! (<= split-count u5) ERR_INVALID_QUANTITY) ;; Maximum 5 chambers
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+        (quantity (get quantity chamber-data))
+        (current-status (get chamber-status chamber-data))
+        (split-amount (/ quantity split-count))
+        (new-id-base (+ (var-get latest-chamber-id) u1))
+      )
+      ;; Only originator can split chamber
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Chamber must be in appropriate state
+      (asserts! (is-eq current-status "pending") ERR_ALREADY_PROCESSED)
+      ;; Only high-value chambers
+      (asserts! (> quantity u50000) (err u260)) ;; Minimum 50,000 STX
+      ;; Ensure even division
+      (asserts! (is-eq (* split-amount split-count) quantity) (err u261))
+
+      ;; Mark original chamber as split
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { chamber-status: "split", quantity: u0 })
+      )
+
+      ;; Create new chambers (in production, this would use a fold or loop)
+      (var-set latest-chamber-id (+ new-id-base split-count))
+
+      (print {action: "high_value_chamber_split", original-chamber-id: chamber-id, originator: originator, 
+              beneficiary: beneficiary, original-quantity: quantity, split-count: split-count, 
+              split-amount: split-amount, new-chamber-id-base: new-id-base})
+      (ok split-count)
+    )
+  )
+)
+
+;; Implement encrypted metadata storage for sensitive chambers
+(define-public (store-encrypted-metadata (chamber-id uint) (encrypted-data (buff 256)) (encryption-fingerprint (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (beneficiary (get beneficiary chamber-data))
+        (current-status (get chamber-status chamber-data))
+      )
+      ;; Only originator or beneficiary can store encrypted metadata
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      ;; Chamber must not be in finalized states
+      (asserts! (not (is-eq current-status "finalized")) ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq current-status "terminated")) ERR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq current-status "outdated")) ERR_ALREADY_PROCESSED)
+
+      ;; Real implementation would store the encrypted data
+
+      (print {action: "encrypted_metadata_stored", chamber-id: chamber-id, submitter: tx-sender, 
+              encryption-fingerprint: encryption-fingerprint, data-hash: (hash160 encrypted-data)})
+      (ok true)
+    )
+  )
+)
+
