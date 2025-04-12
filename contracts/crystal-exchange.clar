@@ -29,3 +29,124 @@
 ;; Current chamber tracking counter
 (define-data-var latest-chamber-id uint u0)
 
+;; Utility operations
+(define-private (valid-beneficiary? (beneficiary principal))
+  (and 
+    (not (is-eq beneficiary tx-sender))
+    (not (is-eq beneficiary (as-contract tx-sender)))
+  )
+)
+
+(define-private (valid-chamber-id? (chamber-id uint))
+  (<= chamber-id (var-get latest-chamber-id))
+)
+
+;; Operational functions
+
+;; Finalize chamber transaction to beneficiary
+(define-public (finalize-chamber-transaction (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (beneficiary (get beneficiary chamber-data))
+        (quantity (get quantity chamber-data))
+        (asset (get asset-id chamber-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender (get originator chamber-data))) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get terminus-block chamber-data)) ERR_CHAMBER_OUTDATED)
+      (match (as-contract (stx-transfer? quantity tx-sender beneficiary))
+        success
+          (begin
+            (map-set ChamberRegistry
+              { chamber-id: chamber-id }
+              (merge chamber-data { chamber-status: "finalized" })
+            )
+            (print {action: "chamber_finalized", chamber-id: chamber-id, beneficiary: beneficiary, asset-id: asset, quantity: quantity})
+            (ok true)
+          )
+        error ERR_TRANSFER_ERROR
+      )
+    )
+  )
+)
+
+;; Prolong chamber lifespan
+(define-public (prolong-chamber-lifespan (chamber-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (asserts! (> additional-blocks u0) ERR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERR_INVALID_QUANTITY) ;; Max ~10 days extension
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data)) 
+        (beneficiary (get beneficiary chamber-data))
+        (current-terminus (get terminus-block chamber-data))
+        (updated-terminus (+ current-terminus additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get chamber-status chamber-data) "pending") (is-eq (get chamber-status chamber-data) "acknowledged")) ERR_ALREADY_PROCESSED)
+      (map-set ChamberRegistry
+        { chamber-id: chamber-id }
+        (merge chamber-data { terminus-block: updated-terminus })
+      )
+      (print {action: "chamber_prolonged", chamber-id: chamber-id, requestor: tx-sender, new-terminus-block: updated-terminus})
+      (ok true)
+    )
+  )
+)
+
+;; Repatriate assets to originator
+(define-public (repatriate-chamber-assets (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (quantity (get quantity chamber-data))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (print {action: "assets_repatriated", chamber-id: chamber-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_TRANSFER_ERROR
+      )
+    )
+  )
+)
+
+;; Originator requests chamber termination
+(define-public (terminate-chamber (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERR_INVALID_ID)
+    (let
+      (
+        (chamber-data (unwrap! (map-get? ChamberRegistry { chamber-id: chamber-id }) ERR_NO_CHAMBER))
+        (originator (get originator chamber-data))
+        (quantity (get quantity chamber-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get chamber-status chamber-data) "pending") ERR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get terminus-block chamber-data)) ERR_CHAMBER_OUTDATED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set ChamberRegistry
+              { chamber-id: chamber-id }
+              (merge chamber-data { chamber-status: "terminated" })
+            )
+            (print {action: "chamber_terminated", chamber-id: chamber-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERR_TRANSFER_ERROR
+      )
+    )
+  )
